@@ -1,0 +1,53 @@
+name: Nightly schedule
+
+on:
+  schedule:
+    - cron: "30 0 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: nightly
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build schedule
+        run: python build_schedule.py --out out --release-base "https://github.com/${{ github.repository }}/releases/download"
+
+      - name: Publish if the feed changed
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          new_feed=$(jq -r .feedDate out/manifest.json)
+          old_feed=$(jq -r .feedDate manifest.json 2>/dev/null || echo none)
+          if [ "$new_feed" = "$old_feed" ]; then
+            echo "Feed $new_feed already published"
+            exit 0
+          fi
+
+          tag=$(cat out/release_tag)
+          gh release create "$tag" out/schedule.sqlite.gz \
+            --title "Schedule $new_feed" \
+            --notes "Red Line schedule built from the Israel Ministry of Transport GTFS feed published $new_feed."
+
+          cp out/manifest.json manifest.json
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add manifest.json
+          git commit -m "Publish schedule $new_feed"
+          git push
+
+          gh release list --limit 100 --json tagName --jq '.[7:][].tagName' \
+            | xargs -r -n1 gh release delete --cleanup-tag --yes
