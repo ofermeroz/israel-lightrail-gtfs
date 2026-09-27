@@ -15,7 +15,9 @@ import gzip
 import hashlib
 import io
 import json
+import math
 import os
+import re
 import shutil
 import sqlite3
 import sys
@@ -25,7 +27,13 @@ import zipfile
 from zoneinfo import ZoneInfo
 
 FEED_URL = "https://gtfs.mot.gov.il/gtfsfiles/israel-public-transportation.zip"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+# Schema changes are additive, so older apps can import a newer database: their importer copies
+# only the tables and columns they know. Each version gets its own manifest pointing at one file.
+COMPATIBLE_SCHEMA_VERSIONS = [1, 2]
+DEFAULT_LINE_COLOR = "D0112B"
+# Map paths are simplified to this many meters, which is invisible at street zoom.
+PATH_TOLERANCE_METERS = 4.0
 ISRAEL = ZoneInfo("Asia/Jerusalem")
 MIN_STATIONS = 30
 
@@ -47,12 +55,14 @@ CREATE TABLE "stations" (
 ) STRICT;
 CREATE TABLE "platforms" (
   "id" INTEGER PRIMARY KEY NOT NULL,
-  "stationID" INTEGER NOT NULL
+  "stationID" INTEGER NOT NULL,
+  "code" INTEGER NOT NULL
 ) STRICT;
 CREATE TABLE "lines" (
   "id" INTEGER PRIMARY KEY NOT NULL,
   "shortName" TEXT NOT NULL,
-  "longName" TEXT NOT NULL
+  "longName" TEXT NOT NULL,
+  "color" TEXT NOT NULL
 ) STRICT;
 CREATE TABLE "services" (
   "id" INTEGER PRIMARY KEY NOT NULL,
@@ -90,6 +100,13 @@ CREATE TABLE "stationOrder" (
   "position" INTEGER NOT NULL,
   PRIMARY KEY ("lineShortName", "stationID")
 ) STRICT;
+CREATE TABLE "linePaths" (
+  "lineID" INTEGER NOT NULL,
+  "sequence" INTEGER NOT NULL,
+  "latitude" REAL NOT NULL,
+  "longitude" REAL NOT NULL,
+  PRIMARY KEY ("lineID", "sequence")
+) STRICT;
 CREATE TABLE "metadata" (
   "key" TEXT PRIMARY KEY NOT NULL,
   "value" TEXT NOT NULL
@@ -115,6 +132,42 @@ def translation_key(name):
 def display_name(name):
     # The feed writes Hebrew gershayim as two apostrophes (e.g. הבעש''ט).
     return name.replace("''", "״").strip()
+
+
+def hebrew_display_name(name):
+    # ...and the geresh as one apostrophe (e.g. אהרונוביץ').
+    return display_name(name).replace("'", "׳")
+
+
+def platform_code(stop_desc):
+    # e.g. "רחוב: ... רציף: 2   קומה: " → 2; 0 when the feed doesn't say.
+    match = re.search(r"רציף:\s*(\d+)", stop_desc)
+    return int(match.group(1)) if match else 0
+
+
+def simplified(points, tolerance):
+    """Douglas–Peucker on (lat, lon) points, measuring distance in meters."""
+    if len(points) < 3:
+        return points
+    lat0 = math.radians(points[0][0])
+    xy = [(lon * 111_320 * math.cos(lat0), lat * 110_540) for lat, lon in points]
+    keep = [False] * len(points)
+    keep[0] = keep[-1] = True
+    stack = [(0, len(points) - 1)]
+    while stack:
+        start, end = stack.pop()
+        (x1, y1), (x2, y2) = xy[start], xy[end]
+        length = math.hypot(x2 - x1, y2 - y1) or 1e-9
+        farthest, distance = None, tolerance
+        for i in range(start + 1, end):
+            x0, y0 = xy[i]
+            d = abs((x2 - x1) * (y1 - y0) - (x1 - x0) * (y2 - y1)) / length
+            if d > distance:
+                farthest, distance = i, d
+        if farthest is not None:
+            keep[farthest] = True
+            stack += [(start, farthest), (farthest, end)]
+    return [p for p, k in zip(points, keep) if k]
 
 
 def download(url, destination):
@@ -159,6 +212,14 @@ def build(archive, agency_id, database_path):
     stop_ids = {st["stop_id"] for st in stop_times}
     stops = {s["stop_id"]: s for s in rows(archive, "stops.txt") if s["stop_id"] in stop_ids}
     services = [c for c in rows(archive, "calendar.txt") if c["service_id"] in service_ids]
+    shape_of_route = {t["route_id"]: t["shape_id"] for t in trips if t["shape_id"]}
+    shape_ids = set(shape_of_route.values())
+    shapes = {}
+    for point in rows(archive, "shapes.txt"):
+        if point["shape_id"] in shape_ids:
+            shapes.setdefault(point["shape_id"], []).append(
+                (int(point["shape_pt_sequence"]), float(point["shape_pt_lat"]), float(point["shape_pt_lon"]))
+            )
 
     keys = {translation_key(s["stop_name"]) for s in stops.values()}
     translations = {key: dict(value) for key, value in TRANSLATION_OVERRIDES.items() if key in keys}
@@ -201,7 +262,7 @@ def build(archive, agency_id, database_path):
     station_rows = []
     for station_id, entry in stations.items():
         names = translations.get(translation_key(entry["name"]), {})
-        hebrew = display_name(entry["name"])
+        hebrew = hebrew_display_name(entry["name"])
         station_rows.append((
             station_id,
             hebrew,
@@ -213,13 +274,30 @@ def build(archive, agency_id, database_path):
         ))
     db.executemany("INSERT INTO stations VALUES (?,?,?,?,?,?,?)", station_rows)
     db.executemany(
-        "INSERT INTO platforms VALUES (?,?)",
-        [(int(stop_id), station_of_stop[stop_id]) for stop_id in stops],
+        "INSERT INTO platforms VALUES (?,?,?)",
+        [(int(stop_id), station_of_stop[stop_id], platform_code(s["stop_desc"])) for stop_id, s in stops.items()],
     )
     db.executemany(
-        "INSERT INTO lines VALUES (?,?,?)",
-        [(int(r["route_id"]), r["route_short_name"], r["route_long_name"]) for r in routes],
+        "INSERT INTO lines VALUES (?,?,?,?)",
+        [
+            (
+                int(r["route_id"]),
+                r["route_short_name"],
+                r["route_long_name"],
+                (r.get("route_color") or DEFAULT_LINE_COLOR).upper(),
+            )
+            for r in routes
+        ],
     )
+    for route_id, shape_id in shape_of_route.items():
+        points = [(lat, lon) for _, lat, lon in sorted(shapes.get(shape_id, []))]
+        db.executemany(
+            "INSERT INTO linePaths VALUES (?,?,?,?)",
+            [
+                (int(route_id), index, round(lat, 6), round(lon, 6))
+                for index, (lat, lon) in enumerate(simplified(points, PATH_TOLERANCE_METERS))
+            ],
+        )
     days = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"]
     db.executemany(
         "INSERT INTO services VALUES (?,?,?,?,?,?,?,?,?,?)",
@@ -270,6 +348,11 @@ def build(archive, agency_id, database_path):
     return db, len(stations), len(trips), valid_from, valid_to
 
 
+def manifest_name(version):
+    # v1 apps read manifest.json; later versions read manifest-v<N>.json.
+    return "manifest.json" if version == 1 else f"manifest-v{version}.json"
+
+
 def iso_date(yyyymmdd):
     text = str(yyyymmdd)
     return f"{text[:4]}-{text[4:6]}-{text[6:]}"
@@ -308,6 +391,11 @@ def main():
         problems.append(f"only {station_count} stations")
     if trip_count == 0:
         problems.append("no trips")
+    unnumbered = db.execute("SELECT count(*) FROM platforms WHERE code = 0").fetchone()[0]
+    if unnumbered:
+        problems.append(f"{unnumbered} platforms without a number")
+    if db.execute("SELECT count(DISTINCT lineID) FROM linePaths").fetchone()[0] == 0:
+        problems.append("no line paths")
     if covering_today == 0:
         problems.append(f"no services cover {today}")
     if problems:
@@ -315,7 +403,7 @@ def main():
         sys.exit("Sanity check failed: " + ", ".join(problems))
 
     feed_date = fed_at.isoformat()
-    tag = "feed-" + fed_at.strftime("%Y%m%d-%H%M")
+    tag = "feed-" + fed_at.strftime("%Y%m%d-%H%M") + f"-s{SCHEMA_VERSION}"
     metadata = {
         "schemaVersion": str(SCHEMA_VERSION),
         "feedDate": feed_date,
@@ -333,19 +421,21 @@ def main():
     with open(gz_path, "wb") as out:
         out.write(compressed)
 
-    manifest = {
-        "schemaVersion": SCHEMA_VERSION,
-        "feedDate": feed_date,
-        "validFrom": metadata["validFrom"],
-        "validTo": metadata["validTo"],
-        "generatedAt": dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat(),
-        "url": f"{args.release_base}/{tag}/schedule.sqlite.gz",
-        "sha256": hashlib.sha256(compressed).hexdigest(),
-        "size": len(compressed),
-    }
-    with open(os.path.join(args.out, "manifest.json"), "w") as out:
-        json.dump(manifest, out, indent=2, ensure_ascii=False)
-        out.write("\n")
+    generated_at = dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat()
+    for version in COMPATIBLE_SCHEMA_VERSIONS:
+        manifest = {
+            "schemaVersion": version,
+            "feedDate": feed_date,
+            "validFrom": metadata["validFrom"],
+            "validTo": metadata["validTo"],
+            "generatedAt": generated_at,
+            "url": f"{args.release_base}/{tag}/schedule.sqlite.gz",
+            "sha256": hashlib.sha256(compressed).hexdigest(),
+            "size": len(compressed),
+        }
+        with open(os.path.join(args.out, manifest_name(version)), "w") as out:
+            json.dump(manifest, out, indent=2, ensure_ascii=False)
+            out.write("\n")
     with open(os.path.join(args.out, "release_tag"), "w") as out:
         out.write(tag + "\n")
 

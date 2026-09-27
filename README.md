@@ -8,22 +8,26 @@ into a typed ~3.5 MB SQLite database (~0.9 MB gzipped) that mobile apps can down
 
 ## Published files
 
-- [`manifest.json`](manifest.json) — the current version: feed date, validity window, download
-  URL, sha256 and size. Clients read this first and download only when `feedDate` changes.
+- [`manifest-v2.json`](manifest-v2.json) — the current version for schema 2 clients: feed date,
+  validity window, download URL, sha256 and size. Clients read this first and download only when
+  `feedDate` changes.
+- [`manifest.json`](manifest.json) — the same database for schema 1 clients. Schema changes are
+  additive, so an older client imports the tables and columns it knows and ignores the rest.
 - `schedule.sqlite.gz` — attached to the release named in the manifest's `url`. Releases are
   immutable per feed version; the last 7 are kept.
 
-## Schema (version 1)
+## Schema (version 2)
 
 | Table | Contents |
 |---|---|
 | `stations` | one row per station (`id` = GTFS `stop_code`), names in Hebrew/English/Arabic, coordinates, `sortOrder` north to south |
-| `platforms` | GTFS stops (one per platform) mapped to their station |
-| `lines` | GTFS routes (`shortName` 1/2/3) |
+| `platforms` | GTFS stops (one per platform) mapped to their station, with the platform number (`code`, from the stop description) |
+| `lines` | GTFS routes (`shortName` 1/2/3) and `color` (hex; the feed leaves it empty, so the Red Line red is the default) |
 | `services` | weekday flags and `startDate`/`endDate` (`yyyymmdd`) |
 | `trips` | line, service, direction, and destination station |
 | `stopTimes` | per-trip platform visits; `arrival`/`departure` in seconds since service-day midnight (may exceed 86 400), `canBoard`/`canAlight` |
 | `stationOrder` | each line's station sequence |
+| `linePaths` | each line's map path from GTFS shapes, simplified to ~4 m |
 | `metadata` | `schemaVersion`, `feedDate`, `validFrom`, `validTo` |
 
 `query.py` is a reference query for direct trips between two stations, including trips after

@@ -31,8 +31,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           new_feed=$(jq -r .feedDate out/manifest.json)
-          old_feed=$(jq -r .feedDate manifest.json 2>/dev/null || echo none)
-          if [ "$new_feed" = "$old_feed" ]; then
+          new_url=$(jq -r .url out/manifest.json)
+          old_url=$(jq -r .url manifest.json 2>/dev/null || echo none)
+          if [ "$new_url" = "$old_url" ]; then
             echo "Feed $new_feed already published"
             exit 0
           fi
@@ -42,10 +43,10 @@ jobs:
             --title "Schedule $new_feed" \
             --notes "Red Line schedule built from the Israel Ministry of Transport GTFS feed published $new_feed."
 
-          cp out/manifest.json manifest.json
+          cp out/manifest*.json .
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add manifest.json
+          git add manifest*.json
           git commit -m "Publish schedule $new_feed"
           git push
 
