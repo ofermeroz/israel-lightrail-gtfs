@@ -1,10 +1,10 @@
 {
   "schemaVersion": 1,
-  "feedDate": "2026-10-25T19:53:02+02:00",
-  "validFrom": "2026-10-26",
-  "validTo": "2026-11-25",
-  "generatedAt": "2026-10-26T05:05:37+00:00",
-  "url": "https://github.com/ofermeroz/israel-lightrail-gtfs/releases/download/feed-20261025-1953-s2/schedule.sqlite.gz",
-  "sha256": "31eb9381563fb0b4f5ca67bc46289bbd1dc244517500423d9ec126bc66bfe849",
-  "size": 1448097
+  "feedDate": "2026-10-26T19:44:20+02:00",
+  "validFrom": "2026-10-27",
+  "validTo": "2026-11-26",
+  "generatedAt": "2026-10-27T05:21:26+00:00",
+  "url": "https://github.com/ofermeroz/israel-lightrail-gtfs/releases/download/feed-20261026-1944-s2/schedule.sqlite.gz",
+  "sha256": "6e004c392fa720f0e9409942576c2e473facab0d65e427fa719aefb1d30b1a19",
+  "size": 1110182
 }
